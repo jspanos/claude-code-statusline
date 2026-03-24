@@ -28,6 +28,18 @@ sudo apt install jq
 
 ## Installation
 
+### Automatic (recommended)
+
+```bash
+git clone https://github.com/jspanos/claude-code-statusline.git
+cd claude-code-statusline
+./install.sh
+```
+
+The script copies `statusline.sh` to `~/.claude/` and adds (or merges) the `statusLine` key into `~/.claude/settings.json`. Then restart Claude Code.
+
+### Manual
+
 1. **Copy the script** to your Claude Code config directory:
 
    ```bash
