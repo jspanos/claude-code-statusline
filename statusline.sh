@@ -20,7 +20,11 @@ IN_TOKENS=$(echo "$input"  | jq -r '.context_window.total_input_tokens // .conte
 OUT_TOKENS=$(echo "$input" | jq -r '.context_window.total_output_tokens // .context_window.current_usage.output_tokens // 0')
 COST=$(echo "$input"       | jq -r '.cost.total_cost_usd // 0')
 DURATION=$(echo "$input"   | jq -r '.cost.total_duration_ms // 0')
+TRANSCRIPT=$(echo "$input"  | jq -r '.transcript_path // empty')
 RATE_5H=$(echo "$input"    | jq -r '.rate_limits.five_hour.used_percentage // empty')
+RATE_5H_RESET=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
+RATE_7D=$(echo "$input"    | jq -r '.rate_limits.seven_day.used_percentage // empty')
+RATE_7D_RESET=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 RESET='\033[0m'
@@ -96,10 +100,82 @@ RATE_PART=""
 if [ -n "$RATE_5H" ]; then
     RATE_INT=$(printf '%.0f' "$RATE_5H")
     RATE_PART=" ${GRAY}|${RESET} ${MAGENTA}plan: ${RATE_INT}%${RESET}"
+    # Show 5h reset time when above 50%
+    if [ "$RATE_INT" -ge 50 ] && [ -n "$RATE_5H_RESET" ]; then
+        NOW=$(date +%s)
+        REMAIN=$(( RATE_5H_RESET - NOW ))
+        if [ "$REMAIN" -gt 0 ]; then
+            RH=$(( REMAIN / 3600 ))
+            RM=$(( (REMAIN % 3600) / 60 ))
+            RATE_PART="${RATE_PART} ${DIM}(${RH}h${RM}m)${RESET}"
+        fi
+    fi
+    # Show weekly when above 80%
+    if [ -n "$RATE_7D" ]; then
+        RATE_7D_INT=$(printf '%.0f' "$RATE_7D")
+        if [ "$RATE_7D_INT" -ge 80 ]; then
+            RATE_PART="${RATE_PART} ${GRAY}|${RESET} ${RED}weekly: ${RATE_7D_INT}%${RESET}"
+            if [ -n "$RATE_7D_RESET" ]; then
+                NOW=${NOW:-$(date +%s)}
+                REMAIN_W=$(( RATE_7D_RESET - NOW ))
+                if [ "$REMAIN_W" -gt 0 ]; then
+                    RD=$(( REMAIN_W / 86400 ))
+                    RWH=$(( (REMAIN_W % 86400) / 3600 ))
+                    RATE_PART="${RATE_PART} ${DIM}(${RD}d${RWH}h)${RESET}"
+                fi
+            fi
+        fi
+    fi
+fi
+
+# ── Tool activity (from transcript) ──────────────────────────────────────────
+TOOL_PART=""
+TASK_PART=""
+if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+    # Find last tool_use (skip meta-tools)
+    LAST_TOOL_LINE=$(tail -n 100 "$TRANSCRIPT" 2>/dev/null \
+        | grep '"tool_use"' \
+        | grep -v '"TaskCreate"\|"TaskUpdate"\|"TaskGet"\|"TaskList"\|"TaskStop"\|"TaskOutput"' \
+        | tail -1)
+    if [ -n "$LAST_TOOL_LINE" ]; then
+        LAST_TOOL=$(echo "$LAST_TOOL_LINE" | jq -r '
+            [.message.content[] | select(.type == "tool_use")][0].name // empty' 2>/dev/null)
+        if [ -n "$LAST_TOOL" ]; then
+            LAST_FILE=$(echo "$LAST_TOOL_LINE" | jq -r '
+                [.message.content[] | select(.type == "tool_use")][0].input
+                | (.file_path // .path // .pattern // empty)' 2>/dev/null)
+            if [ -n "$LAST_FILE" ]; then
+                LAST_FILE="${LAST_FILE##*/}"  # basename
+                TOOL_PART=" ${GRAY}|${RESET} ${DIM}🔧 ${LAST_TOOL} ${LAST_FILE}${RESET}"
+            else
+                TOOL_PART=" ${GRAY}|${RESET} ${DIM}🔧 ${LAST_TOOL}${RESET}"
+            fi
+        fi
+    fi
+
+    # Task progress
+    TASK_TOTAL=$(grep -c '"TaskCreate"' "$TRANSCRIPT" 2>/dev/null)
+    if [ "$TASK_TOTAL" -gt 0 ]; then
+        TASK_DONE=$(grep '"TaskUpdate"' "$TRANSCRIPT" 2>/dev/null | grep -c '"completed"')
+        TASK_REMAINING=$(( TASK_TOTAL - TASK_DONE ))
+        # Current task: last TaskCreate subject
+        CURRENT_TASK=$(grep '"TaskCreate"' "$TRANSCRIPT" 2>/dev/null | tail -1 \
+            | jq -r '[.message.content[] | select(.name == "TaskCreate")][0].input.subject // empty' 2>/dev/null)
+        # If all done, show checkmark; otherwise show remaining
+        if [ "$TASK_REMAINING" -le 0 ]; then
+            TASK_PART=" ${GRAY}|${RESET} ${GREEN}✓ ${TASK_DONE}/${TASK_TOTAL} tasks${RESET}"
+        else
+            TASK_PART=" ${GRAY}|${RESET} ${WHITE}📋 ${TASK_DONE}/${TASK_TOTAL}${RESET}"
+            if [ -n "$CURRENT_TASK" ]; then
+                [ ${#CURRENT_TASK} -gt 30 ] && CURRENT_TASK="${CURRENT_TASK:0:27}..."
+                TASK_PART="${TASK_PART} ${DIM}${CURRENT_TASK}${RESET}"
+            fi
+        fi
+    fi
 fi
 
 # ── Output ───────────────────────────────────────────────────────────────────
-# Line 1: model | dirs | git
-echo -e " ${BLUE}⬡ ${MODEL}${RESET}  ${GRAY}|${RESET}  📁 ${DIR_DISPLAY}${GIT_PART}"
+# Line 1: model | dirs | git | tool | tasks
+echo -e " ${BLUE}⬡ ${MODEL}${RESET}  ${GRAY}|${RESET}  📁 ${DIR_DISPLAY}${GIT_PART}${TOOL_PART}${TASK_PART}"
 # Line 2: context bar + % + tokens | cost | time | rate limit
 echo -e " ${BAR_COLOR}${BAR}${RESET} ${BAR_COLOR}${PCT}% ctx${RESET}  ${GRAY}${CTX_TOKENS}${RESET}  ${GRAY}|${RESET}  ${YELLOW}${COST_FMT}${RESET}  ${GRAY}|${RESET}  ${GRAY}⏱ ${TIME_FMT}${RESET}${RATE_PART}"

@@ -6,8 +6,8 @@ A two-line status bar for [Claude Code](https://github.com/anthropics/claude-cod
 
 ![Claude Code Status Bar](screenshot.png)
 
-**Line 1** — model · working directory · git branch + staged/modified counts
-**Line 2** — context bar · % used · token counts · session cost · elapsed time · plan usage
+**Line 1** — model · working directory · git branch + staged/modified counts · last tool + file · task progress
+**Line 2** — context bar · % used · token counts · session cost · elapsed time · plan usage (with reset countdown) · weekly usage
 
 ## Requirements
 
@@ -74,7 +74,10 @@ The script copies `statusline.sh` to `~/.claude/` and adds (or merges) the `stat
 | `↑ ↓` | Input / output token totals for the session |
 | `$X.XXXX` | Estimated session cost in USD |
 | `⏱ Xm Xs` | Total session wall-clock time |
-| `plan: X%` | 5-hour rate limit usage (only shown when available) |
+| `🔧 Tool file` | Last tool used and target file (parsed from session transcript) |
+| `📋 done/total` | Task progress — completed vs total tasks, with current task name |
+| `plan: X% (Xh Xm)` | 5-hour rate limit usage; reset countdown shown when ≥ 50% |
+| `weekly: X% (Xd Xh)` | 7-day rate limit usage; only shown when ≥ 80% |
 
 ## Customization
 
