@@ -18,8 +18,11 @@ CTX_USED=$(echo "$input"   | jq -r '
   )')
 IN_TOKENS=$(echo "$input"  | jq -r '.context_window.total_input_tokens // .context_window.current_usage.input_tokens // 0')
 OUT_TOKENS=$(echo "$input" | jq -r '.context_window.total_output_tokens // .context_window.current_usage.output_tokens // 0')
+CACHE_READ=$(echo "$input" | jq -r '.context_window.current_usage.cache_read_input_tokens // 0')
+CACHE_WRITE=$(echo "$input" | jq -r '.context_window.current_usage.cache_creation_input_tokens // 0')
 COST=$(echo "$input"       | jq -r '.cost.total_cost_usd // 0')
 DURATION=$(echo "$input"   | jq -r '.cost.total_duration_ms // 0')
+API_DUR=$(echo "$input"    | jq -r '.cost.total_api_duration_ms // 0')
 TRANSCRIPT=$(echo "$input"  | jq -r '.transcript_path // empty')
 RATE_5H=$(echo "$input"    | jq -r '.rate_limits.five_hour.used_percentage // empty')
 RATE_5H_RESET=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
@@ -88,18 +91,43 @@ MINS=$(( SECS / 60 ))
 SECS=$(( SECS % 60 ))
 TIME_FMT="${MINS}m ${SECS}s"
 
+# ── Speed (output tokens/sec) ───────────────────────────────────────────────
+SPEED_PART=""
+if [ "$API_DUR" -gt 0 ] && [ "$OUT_TOKENS" -gt 0 ]; then
+    # tokens/sec = OUT_TOKENS / (API_DUR / 1000) = OUT_TOKENS * 1000 / API_DUR
+    TPS=$(( OUT_TOKENS * 1000 / API_DUR ))
+    SPEED_PART=" ${DIM}(${TPS} t/s)${RESET}"
+fi
+
 # ── Token counts (human-readable k) ─────────────────────────────────────────
 CTX_USED_K=$(( CTX_USED / 1000 ))
 CTX_SIZE_K=$(( CTX_SIZE / 1000 ))
 IN_K=$(( IN_TOKENS / 1000 ))
 OUT_K=$(( OUT_TOKENS / 1000 ))
-CTX_TOKENS="${CTX_USED_K}k / ${CTX_SIZE_K}k  ↑${IN_K}k ↓${OUT_K}k"
+CACHE_R_K=$(( CACHE_READ / 1000 ))
+CACHE_W_K=$(( CACHE_WRITE / 1000 ))
+# Cache hit ratio as percentage of total context input
+CACHE_PART=""
+if [ "$CTX_USED" -gt 0 ] && [ "$CACHE_READ" -gt 0 ]; then
+    CACHE_PCT=$(( CACHE_READ * 100 / CTX_USED ))
+    CACHE_PART="  ⚡${CACHE_R_K}k(${CACHE_PCT}%)"
+fi
+CTX_TOKENS="${CTX_USED_K}k / ${CTX_SIZE_K}k  ↑${IN_K}k ↓${OUT_K}k${CACHE_PART}"
 
 # ── Rate limits ──────────────────────────────────────────────────────────────
 RATE_PART=""
 if [ -n "$RATE_5H" ]; then
     RATE_INT=$(printf '%.0f' "$RATE_5H")
-    RATE_PART=" ${GRAY}|${RESET} ${MAGENTA}plan: ${RATE_INT}%${RESET}"
+    if [ "$RATE_INT" -ge 90 ]; then
+        RATE_COLOR="$RED"
+    elif [ "$RATE_INT" -ge 70 ]; then
+        RATE_COLOR="$YELLOW"
+    elif [ "$RATE_INT" -ge 50 ]; then
+        RATE_COLOR="$MAGENTA"
+    else
+        RATE_COLOR="$GREEN"
+    fi
+    RATE_PART=" ${GRAY}|${RESET} ${RATE_COLOR}plan: ${RATE_INT}%${RESET}"
     # Show 5h reset time when above 50%
     if [ "$RATE_INT" -ge 50 ] && [ -n "$RATE_5H_RESET" ]; then
         NOW=$(date +%s)
@@ -178,4 +206,4 @@ fi
 # Line 1: model | dirs | git | tool | tasks
 echo -e " ${BLUE}⬡ ${MODEL}${RESET}  ${GRAY}|${RESET}  📁 ${DIR_DISPLAY}${GIT_PART}${TOOL_PART}${TASK_PART}"
 # Line 2: context bar + % + tokens | cost | time | rate limit
-echo -e " ${BAR_COLOR}${BAR}${RESET} ${BAR_COLOR}${PCT}% ctx${RESET}  ${GRAY}${CTX_TOKENS}${RESET}  ${GRAY}|${RESET}  ${YELLOW}${COST_FMT}${RESET}  ${GRAY}|${RESET}  ${GRAY}⏱ ${TIME_FMT}${RESET}${RATE_PART}"
+echo -e " ${BAR_COLOR}${BAR}${RESET} ${BAR_COLOR}${PCT}% ctx${RESET}  ${GRAY}${CTX_TOKENS}${RESET}  ${GRAY}|${RESET}  ${YELLOW}${COST_FMT}${RESET}  ${GRAY}|${RESET}  ${GRAY}⏱ ${TIME_FMT}${RESET}${SPEED_PART}${RATE_PART}"
