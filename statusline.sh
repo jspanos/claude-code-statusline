@@ -182,12 +182,12 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
     fi
 
     # Task progress
-    TASK_TOTAL=$(grep -c '"TaskCreate"' "$TRANSCRIPT" 2>/dev/null)
+    TASK_TOTAL=$(grep '"tool_use"' "$TRANSCRIPT" 2>/dev/null | grep -c '"TaskCreate"')
     if [ "$TASK_TOTAL" -gt 0 ]; then
-        TASK_DONE=$(grep '"TaskUpdate"' "$TRANSCRIPT" 2>/dev/null | grep -c '"completed"')
+        TASK_DONE=$(grep '"tool_use"' "$TRANSCRIPT" 2>/dev/null | grep '"TaskUpdate"' | grep -c '"completed"')
         TASK_REMAINING=$(( TASK_TOTAL - TASK_DONE ))
         # Current task: last TaskCreate subject
-        CURRENT_TASK=$(grep '"TaskCreate"' "$TRANSCRIPT" 2>/dev/null | tail -1 \
+        CURRENT_TASK=$(grep '"tool_use"' "$TRANSCRIPT" 2>/dev/null | grep '"TaskCreate"' | tail -1 \
             | jq -r '[.message.content[] | select(.name == "TaskCreate")][0].input.subject // empty' 2>/dev/null)
         # If all done, show checkmark; otherwise show remaining
         if [ "$TASK_REMAINING" -le 0 ]; then
