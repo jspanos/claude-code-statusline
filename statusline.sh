@@ -4,6 +4,13 @@
 
 input=$(cat)
 
+# ── Debug: dump raw JSON once to discover all available fields ──────────────
+DEBUG_DUMP="$HOME/.claude/usage-logs/raw_input_sample.json"
+if [ ! -f "$DEBUG_DUMP" ]; then
+    mkdir -p "$(dirname "$DEBUG_DUMP")"
+    echo "$input" | jq '.' > "$DEBUG_DUMP" 2>/dev/null
+fi
+
 # ── Extract fields ──────────────────────────────────────────────────────────
 MODEL=$(echo "$input"      | jq -r '.model.display_name // "unknown"')
 PROJECT=$(echo "$input"    | jq -r '.workspace.project_dir // .cwd // ""')
@@ -28,6 +35,20 @@ RATE_5H=$(echo "$input"    | jq -r '.rate_limits.five_hour.used_percentage // em
 RATE_5H_RESET=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
 RATE_7D=$(echo "$input"    | jq -r '.rate_limits.seven_day.used_percentage // empty')
 RATE_7D_RESET=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+
+# ── CSV logging (flock for concurrent session safety) ───────────────────────
+CSV_DIR="$HOME/.claude/usage-logs"
+CSV_FILE="$CSV_DIR/usage_$(date +%Y-%m).csv"
+CSV_LOCK="$CSV_DIR/.lock"
+mkdir -p "$CSV_DIR"
+CSV_ROW="$(date -u +%Y-%m-%dT%H:%M:%SZ),${MODEL},${PCT},${CTX_USED},${CTX_SIZE},${IN_TOKENS},${OUT_TOKENS},${CACHE_READ},${CACHE_WRITE},${COST},${DURATION},${API_DUR},${RATE_5H:-},${RATE_5H_RESET:-},${RATE_7D:-},${RATE_7D_RESET:-}"
+(
+    flock -w 2 9 || exit 0
+    if [ ! -f "$CSV_FILE" ]; then
+        echo "timestamp,model,context_pct,context_used,context_size,in_tokens,out_tokens,cache_read,cache_write,cost_usd,duration_ms,api_duration_ms,rate_5h_pct,rate_5h_resets_at,rate_7d_pct,rate_7d_resets_at" > "$CSV_FILE"
+    fi
+    echo "$CSV_ROW" >> "$CSV_FILE"
+) 9>"$CSV_LOCK"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 RESET='\033[0m'
