@@ -35,20 +35,47 @@ RATE_5H=$(echo "$input"    | jq -r '.rate_limits.five_hour.used_percentage // em
 RATE_5H_RESET=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
 RATE_7D=$(echo "$input"    | jq -r '.rate_limits.seven_day.used_percentage // empty')
 RATE_7D_RESET=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+SESSION_ID=$(echo "$input"   | jq -r '.session_id // "unknown"')
 
-# ── CSV logging (flock for concurrent session safety) ───────────────────────
+# ── CSV logging (mkdir lock + spill queue for guaranteed delivery) ────────────
 CSV_DIR="$HOME/.claude/usage-logs"
 CSV_FILE="$CSV_DIR/usage_$(date +%Y-%m).csv"
-CSV_LOCK="$CSV_DIR/.lock"
+CSV_LOCKDIR="$CSV_DIR/.lock.d"
+CSV_SPILL="$CSV_DIR/.spill"
+CSV_HEADER="timestamp,session_id,model,context_pct,context_used,context_size,in_tokens,out_tokens,cache_read,cache_write,cost_usd,duration_ms,api_duration_ms,rate_5h_pct,rate_5h_resets_at,rate_7d_pct,rate_7d_resets_at"
 mkdir -p "$CSV_DIR"
-CSV_ROW="$(date -u +%Y-%m-%dT%H:%M:%SZ),${MODEL},${PCT},${CTX_USED},${CTX_SIZE},${IN_TOKENS},${OUT_TOKENS},${CACHE_READ},${CACHE_WRITE},${COST},${DURATION},${API_DUR},${RATE_5H:-},${RATE_5H_RESET:-},${RATE_7D:-},${RATE_7D_RESET:-}"
-(
-    flock -w 2 9 || exit 0
-    if [ ! -f "$CSV_FILE" ]; then
-        echo "timestamp,model,context_pct,context_used,context_size,in_tokens,out_tokens,cache_read,cache_write,cost_usd,duration_ms,api_duration_ms,rate_5h_pct,rate_5h_resets_at,rate_7d_pct,rate_7d_resets_at" > "$CSV_FILE"
+CSV_ROW="$(date -u +%Y-%m-%dT%H:%M:%SZ),${SESSION_ID},${MODEL},${PCT},${CTX_USED},${CTX_SIZE},${IN_TOKENS},${OUT_TOKENS},${CACHE_READ},${CACHE_WRITE},${COST},${DURATION},${API_DUR},${RATE_5H:-},${RATE_5H_RESET:-},${RATE_7D:-},${RATE_7D_RESET:-}"
+
+# mkdir is atomic on POSIX — use as lock (macOS has no flock)
+_csv_locked=0
+for _i in 1 2 3 4 5; do
+    if mkdir "$CSV_LOCKDIR" 2>/dev/null; then
+        _csv_locked=1
+        break
     fi
-    echo "$CSV_ROW" >> "$CSV_FILE"
-) 9>"$CSV_LOCK"
+    sleep 0.1
+done
+
+if [ "$_csv_locked" -eq 1 ]; then
+    # Ensure CSV has header
+    if [ ! -f "$CSV_FILE" ]; then
+        echo "$CSV_HEADER" > "$CSV_FILE"
+    fi
+    # Drain any queued spill rows into CSV in timestamp order
+    if [ -s "$CSV_SPILL" ]; then
+        # Merge: existing data (skip header) + spill + current row, sort by timestamp
+        { tail -n +2 "$CSV_FILE"; cat "$CSV_SPILL"; echo "$CSV_ROW"; } \
+            | sort -t, -k1,1 > "$CSV_DIR/.merge_tmp"
+        { echo "$CSV_HEADER"; cat "$CSV_DIR/.merge_tmp"; } > "$CSV_FILE"
+        rm -f "$CSV_DIR/.merge_tmp" "$CSV_SPILL"
+    else
+        echo "$CSV_ROW" >> "$CSV_FILE"
+    fi
+    rmdir "$CSV_LOCKDIR" 2>/dev/null
+else
+    # Lock failed — queue row to spill file for next successful write
+    echo "$CSV_ROW" >> "$CSV_SPILL"
+fi
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 RESET='\033[0m'
