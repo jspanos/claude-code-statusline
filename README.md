@@ -79,6 +79,46 @@ The script copies `statusline.sh` to `~/.claude/` and adds (or merges) the `stat
 | `plan: X% (Xh Xm)` | 5-hour rate limit usage; reset countdown shown when ≥ 50% |
 | `weekly: X% (Xd Xh)` | 7-day rate limit usage; only shown when ≥ 80% |
 
+## Sending metrics to an OTLP receiver (optional)
+
+Every status-line refresh can also push session metrics to any OTLP/HTTP endpoint
+(e.g. [OtelHub](https://github.com/your/otelhub), Grafana Agent, OTel Collector).
+Set two env vars and the emission happens in the background — nothing blocks
+the status line rendering.
+
+```bash
+export OTELHUB_URL=http://localhost:8000        # receiver base URL
+export OTELHUB_TOKEN=otlh_xxx                   # bearer token
+```
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` is honored as a fallback for `OTELHUB_URL`.
+Leave both vars unset to disable emission entirely — CSV logging is unaffected.
+
+### Metrics emitted
+
+All emitted as gauges, one data point per status-line refresh:
+
+| Metric | Unit |
+|---|---|
+| `claude.context.used_percentage` | % |
+| `claude.context.used_tokens` | tokens |
+| `claude.context.window_size` | tokens |
+| `claude.tokens.input` / `.output` | tokens |
+| `claude.tokens.cache_read` / `.cache_write` | tokens |
+| `claude.cost.usd` | USD |
+| `claude.duration.total_ms` / `.api_ms` | ms |
+| `claude.rate_limit.5h_pct` / `.7d_pct` | % (when available) |
+
+### Resource attributes
+
+Each payload carries these resource-level attributes so you can slice by session,
+model, or project in your backend:
+
+- `service.name` = `claude-code`
+- `session.id`
+- `claude.model`
+- `claude.project`
+
 ## Customization
 
 The script is a single self-contained Bash file — every section is clearly labeled with comments. Common tweaks:
