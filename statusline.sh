@@ -10,8 +10,12 @@
 
 input=$(cat)
 
-# ── Single jq parse: emit all fields as TSV ─────────────────────────────────
-IFS=$'\t' read -r MODEL PROJECT CWD PCT CTX_SIZE CTX_USED IN_TOKENS OUT_TOKENS \
+# ── Single jq parse: emit all fields, unit-separator (\x1f) delimited ───────
+# NOTE: use \x1f, not \t. `read` collapses runs of IFS-whitespace (tab included),
+# so empty middle fields (e.g. absent rate_limits) would merge adjacent tabs and
+# shift every later field left — dropping SESSION_ID. \x1f is non-whitespace, so
+# empty fields are preserved positionally.
+IFS=$'\x1f' read -r MODEL PROJECT CWD PCT CTX_SIZE CTX_USED IN_TOKENS OUT_TOKENS \
   CACHE_READ CACHE_WRITE COST DURATION API_DUR TRANSCRIPT \
   RATE_5H RATE_5H_RESET RATE_7D RATE_7D_RESET SESSION_ID < <(
   printf '%s' "$input" | jq -r '
@@ -39,7 +43,7 @@ IFS=$'\t' read -r MODEL PROJECT CWD PCT CTX_SIZE CTX_USED IN_TOKENS OUT_TOKENS \
     , s(.rate_limits.seven_day.used_percentage)
     , s(.rate_limits.seven_day.resets_at)
     , (.session_id // "unknown")
-    ] | @tsv'
+    ] | join("")'
 )
 
 # ── CSV logging (single append; merge only when recovering from spill) ──────
@@ -196,14 +200,50 @@ BAR=""
 [ "$EMPTY"  -gt 0 ] && printf -v E "%${EMPTY}s"  && BAR="${BAR}${E// /░}"
 
 COST_FMT=$(printf '$%.4f' "$COST")
+
+# ── Cache savings ($ avoided by cache reads) ────────────────────────────────
+# Cache reads bill at ~10% of the input rate, so each cached token saves ~90% of
+# the input price. Approximate input $/Mtok by model family; authoritative spend
+# stays COST (from Claude Code), this only surfaces what caching avoided.
+case "$MODEL" in
+    *Opus*)   IN_PRICE=15 ;;
+    *Haiku*)  IN_PRICE=1 ;;
+    *Sonnet*) IN_PRICE=3 ;;
+    *)        IN_PRICE=3 ;;
+esac
+SAVED_PART=""
+if [ "$CACHE_READ" -gt 0 ]; then
+    # saved ≈ cache_read * in_price * 0.9 / 1e6  (milli-dollars for integer math)
+    SAVED_MILLI=$(( CACHE_READ * IN_PRICE * 9 / 10000 ))
+    if [ "$SAVED_MILLI" -gt 0 ]; then
+        SAVED_FMT=$(printf '$%.2f' "$(( SAVED_MILLI ))e-3")
+        SAVED_PART=" ${DIM}${GREEN}(saved ${SAVED_FMT})${RESET}"
+    fi
+fi
 SECS=$(( DURATION / 1000 )); MINS=$(( SECS / 60 )); SECS=$(( SECS % 60 ))
 TIME_FMT="${MINS}m ${SECS}s"
 
+# ── Output speed (tokens/sec) ───────────────────────────────────────────────
+# Compute from the DELTA between redraws, not cumulative totals: output tokens
+# accrue per-turn while api_duration is cumulative, so cumulative division was
+# ~0 most of the time. State file remembers the last non-zero speed so the value
+# stays meaningful between turns instead of collapsing to 0.
 SPEED_PART=""
-if [ "$API_DUR" -gt 0 ] && [ "$OUT_TOKENS" -gt 0 ]; then
-    TPS=$(( OUT_TOKENS * 1000 / API_DUR ))
-    SPEED_PART=" ${DIM}(${TPS} t/s)${RESET}"
+TPS_STATE="$CSV_DIR/.tps-state-${SESSION_ID}"
+PREV_OUT=0; PREV_API=0; LAST_TPS=0
+[ -f "$TPS_STATE" ] && IFS=' ' read -r PREV_OUT PREV_API LAST_TPS < "$TPS_STATE"
+D_OUT=$(( OUT_TOKENS - PREV_OUT ))
+D_API=$(( API_DUR - PREV_API ))
+if [ "$D_OUT" -gt 0 ] && [ "$D_API" -gt 0 ]; then
+    LAST_TPS=$(( D_OUT * 1000 / D_API ))
+elif [ "$LAST_TPS" -le 0 ] && [ "$API_DUR" -gt 0 ] && [ "$OUT_TOKENS" -gt 0 ]; then
+    LAST_TPS=$(( OUT_TOKENS * 1000 / API_DUR ))   # cold-start fallback: session average
 fi
+# Persist newest cumulative values (only advance, never rewind on stale redraws)
+if [ "$OUT_TOKENS" -ge "$PREV_OUT" ] && [ "$API_DUR" -ge "$PREV_API" ]; then
+    echo "$OUT_TOKENS $API_DUR $LAST_TPS" > "$TPS_STATE"
+fi
+[ "$LAST_TPS" -gt 0 ] && SPEED_PART=" ${DIM}(${LAST_TPS} t/s)${RESET}"
 
 CTX_USED_K=$(( CTX_USED / 1000 ))
 CTX_SIZE_K=$(( CTX_SIZE / 1000 ))
@@ -221,9 +261,10 @@ CTX_TOKENS="${CTX_USED_K}k / ${CTX_SIZE_K}k  ↑${IN_K}k ↓${OUT_K}k${CACHE_PAR
 RATE_PART=""
 if [ -n "$RATE_5H" ]; then
     RATE_INT=$(printf '%.0f' "$RATE_5H")
+    # Strictly escalating: green → yellow → red (no color ever cools off as usage rises)
     if   [ "$RATE_INT" -ge 90 ]; then RATE_COLOR="$RED"
-    elif [ "$RATE_INT" -ge 70 ]; then RATE_COLOR="$YELLOW"
-    elif [ "$RATE_INT" -ge 50 ]; then RATE_COLOR="$MAGENTA"
+    elif [ "$RATE_INT" -ge 70 ]; then RATE_COLOR="${BOLD}${YELLOW}"
+    elif [ "$RATE_INT" -ge 50 ]; then RATE_COLOR="$YELLOW"
     else                              RATE_COLOR="$GREEN"
     fi
     RATE_PART=" ${GRAY}|${RESET} ${RATE_COLOR}plan: ${RATE_INT}%${RESET}"
@@ -263,6 +304,8 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
     if [ "$T_MTIME" -gt "$C_MTIME" ]; then
         # Single awk pass through transcript: track last tool_use, count TaskCreate/TaskUpdate completed
         awk '
+            # Count user prompts: a "user" JSONL line that is not a tool_result carrier.
+            /"type":"user"/ { if (index($0, "\"tool_result\"") == 0) prompts++ }
             /"tool_use"/ {
                 if (match($0, /"name":"[^"]+"/)) {
                     name = substr($0, RSTART+8, RLENGTH-9)
@@ -289,13 +332,14 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
                     n = split(last_file, parts, "/")
                     if (n > 0) last_file = parts[n]
                 }
-                printf "%s\t%s\t%d\t%d\t%s\n", last_tool, last_file, tc+0, tu_done+0, current_task
+                # \037 (0x1f) separator, not \t: preserves empty fields on read (see main parse note)
+                printf "%s\037%s\037%d\037%d\037%s\037%d\n", last_tool, last_file, tc+0, tu_done+0, current_task, prompts+0
             }
         ' "$TRANSCRIPT" > "$CACHE_FILE" 2>/dev/null
     fi
 
     if [ -f "$CACHE_FILE" ]; then
-        IFS=$'\t' read -r LAST_TOOL LAST_FILE TASK_TOTAL TASK_DONE CURRENT_TASK < "$CACHE_FILE"
+        IFS=$'\x1f' read -r LAST_TOOL LAST_FILE TASK_TOTAL TASK_DONE CURRENT_TASK PROMPT_COUNT < "$CACHE_FILE"
         if [ -n "$LAST_TOOL" ]; then
             if [ -n "$LAST_FILE" ]; then
                 TOOL_PART=" ${GRAY}|${RESET} ${DIM}🔧 ${LAST_TOOL} ${LAST_FILE}${RESET}"
@@ -318,6 +362,10 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
     fi
 fi
 
+# ── Prompt counter (messages you've sent this session) ──────────────────────
+PROMPT_PART=""
+[ "${PROMPT_COUNT:-0}" -gt 0 ] && PROMPT_PART=" ${GRAY}|${RESET} ${DIM}💬 ${PROMPT_COUNT}${RESET}"
+
 # ── Output ──────────────────────────────────────────────────────────────────
-echo -e " ${BLUE}⬡ ${MODEL}${RESET}  ${GRAY}|${RESET}  📁 ${DIR_DISPLAY}${GIT_PART}${TOOL_PART}${TASK_PART}"
-echo -e " ${BAR_COLOR}${BAR}${RESET} ${BAR_COLOR}${PCT}% ctx${RESET}  ${GRAY}${CTX_TOKENS}${RESET}  ${GRAY}|${RESET}  ${YELLOW}${COST_FMT}${RESET}  ${GRAY}|${RESET}  ${GRAY}⏱ ${TIME_FMT}${RESET}${SPEED_PART}${RATE_PART}"
+echo -e " ${BLUE}⬡ ${MODEL}${RESET}  ${GRAY}|${RESET}  📁 ${DIR_DISPLAY}${GIT_PART}${PROMPT_PART}${TOOL_PART}${TASK_PART}"
+echo -e " ${BAR_COLOR}${BAR}${RESET} ${BAR_COLOR}${PCT}% ctx${RESET}  ${GRAY}${CTX_TOKENS}${RESET}  ${GRAY}|${RESET}  ${YELLOW}${COST_FMT}${RESET}${SAVED_PART}  ${GRAY}|${RESET}  ${GRAY}⏱ ${TIME_FMT}${RESET}${SPEED_PART}${RATE_PART}"
