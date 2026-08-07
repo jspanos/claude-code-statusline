@@ -292,31 +292,28 @@ if [ -n "$RATE_5H" ]; then
     fi
 fi
 
-# ── Tool activity + Task progress (cached by transcript mtime) ──────────────
-TOOL_PART=""; TASK_PART=""
+# ── Tool activity (cached by transcript mtime) ──────────────────────────────
+TOOL_PART=""
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-    CACHE_FILE="$CSV_DIR/.transcript-cache-${SESSION_ID}.tsv"
+    # v2 cache layout: task counts no longer come from the transcript (see the
+    # Task progress block below), so the field list shrank. The new filename
+    # stops a stale v1 cache from being parsed with the wrong field order.
+    CACHE_FILE="$CSV_DIR/.transcript-cache-v2-${SESSION_ID}.tsv"
     T_MTIME=$(stat -f %m "$TRANSCRIPT" 2>/dev/null || echo 0)
     C_MTIME=0
     [ -f "$CACHE_FILE" ] && C_MTIME=$(stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)
 
     # Recompute only if transcript changed since cache (mtime is monotonic for append-only files)
     if [ "$T_MTIME" -gt "$C_MTIME" ]; then
-        # Single awk pass through transcript: track last tool_use, count TaskCreate/TaskUpdate completed
+        # Single awk pass through transcript: track last tool_use and prompt count
         awk '
             # Count user prompts: a "user" JSONL line that is not a tool_result carrier.
             /"type":"user"/ { if (index($0, "\"tool_result\"") == 0) prompts++ }
             /"tool_use"/ {
                 if (match($0, /"name":"[^"]+"/)) {
                     name = substr($0, RSTART+8, RLENGTH-9)
-                    if (name == "TaskCreate") {
-                        tc++
-                        if (match($0, /"subject":"[^"]*"/)) {
-                            current_task = substr($0, RSTART+11, RLENGTH-12)
-                        }
-                    } else if (name == "TaskUpdate") {
-                        if (index($0, "\"completed\"") > 0) tu_done++
-                    } else if (name != "TaskGet" && name != "TaskList" && name != "TaskStop" && name != "TaskOutput") {
+                    # Task* calls are bookkeeping, not activity worth showing.
+                    if (name !~ /^Task(Create|Update|Get|List|Stop|Output)$/) {
                         last_tool = name
                         last_input = $0
                     }
@@ -333,13 +330,13 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
                     if (n > 0) last_file = parts[n]
                 }
                 # \037 (0x1f) separator, not \t: preserves empty fields on read (see main parse note)
-                printf "%s\037%s\037%d\037%d\037%s\037%d\n", last_tool, last_file, tc+0, tu_done+0, current_task, prompts+0
+                printf "%s\037%s\037%d\n", last_tool, last_file, prompts+0
             }
         ' "$TRANSCRIPT" > "$CACHE_FILE" 2>/dev/null
     fi
 
     if [ -f "$CACHE_FILE" ]; then
-        IFS=$'\x1f' read -r LAST_TOOL LAST_FILE TASK_TOTAL TASK_DONE CURRENT_TASK PROMPT_COUNT < "$CACHE_FILE"
+        IFS=$'\x1f' read -r LAST_TOOL LAST_FILE PROMPT_COUNT < "$CACHE_FILE"
         if [ -n "$LAST_TOOL" ]; then
             if [ -n "$LAST_FILE" ]; then
                 TOOL_PART=" ${GRAY}|${RESET} ${DIM}🔧 ${LAST_TOOL} ${LAST_FILE}${RESET}"
@@ -347,9 +344,41 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
                 TOOL_PART=" ${GRAY}|${RESET} ${DIM}🔧 ${LAST_TOOL}${RESET}"
             fi
         fi
+    fi
+fi
+
+# ── Task progress (live, from the task directory) ───────────────────────────
+# Read the files Claude actually acts on instead of replaying TaskCreate /
+# TaskUpdate calls out of the transcript. The transcript is append-only, so
+# replayed counters only ever grow: a deleted task stays in the denominator,
+# Claude's "every task completed -> wipe the list" sweep is invisible, and any
+# edit made outside this session (a teammate agent, the tmux popup) never shows
+# up at all. Matching on the substring "completed" also mis-counted a
+# TaskUpdate whose subject merely contained the word.
+#
+# Tasks live in ~/.claude/tasks/session-<first 8 chars of session uuid>/, one
+# small JSON per task. Obsolete tasks (metadata.obsolete) drop out of both the
+# numerator and the denominator, and the label is the task actually in
+# progress rather than the most recently created one.
+TASK_PART=""
+TASK_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/session-${SESSION_ID:0:8}"
+if [ -d "$TASK_DIR" ] && command -v jq >/dev/null 2>&1; then
+    # One jq over a handful of tiny files. No mtime cache here on purpose: a
+    # status change rewrites a file in place without touching the directory
+    # mtime, so a directory-mtime cache would go stale exactly when it matters.
+    TASK_STATS="$(jq -s -r --arg sep $'\037' '
+        map(select(.metadata.obsolete != true))
+        | (map(select(.status == "completed")) | length) as $done
+        | (map(select(.status == "in_progress")) | first) as $cur
+        | [ ($done | tostring),
+            (length | tostring),
+            (($cur.activeForm // $cur.subject) // "") ] | join($sep)
+    ' "$TASK_DIR"/*.json 2>/dev/null)"
+
+    if [ -n "$TASK_STATS" ]; then
+        IFS=$'\x1f' read -r TASK_DONE TASK_TOTAL CURRENT_TASK <<< "$TASK_STATS"
         if [ "${TASK_TOTAL:-0}" -gt 0 ]; then
-            TASK_REMAINING=$(( TASK_TOTAL - TASK_DONE ))
-            if [ "$TASK_REMAINING" -le 0 ]; then
+            if [ "${TASK_DONE:-0}" -ge "$TASK_TOTAL" ]; then
                 TASK_PART=" ${GRAY}|${RESET} ${GREEN}✓ ${TASK_DONE}/${TASK_TOTAL} tasks${RESET}"
             else
                 TASK_PART=" ${GRAY}|${RESET} ${WHITE}📋 ${TASK_DONE}/${TASK_TOTAL}${RESET}"

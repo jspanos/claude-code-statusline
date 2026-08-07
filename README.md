@@ -97,7 +97,7 @@ The script copies `statusline.sh` to `~/.claude/` and adds (or merges) the `stat
 | `⏱ Xm Xs` | Total session wall-clock time |
 | `(N t/s)` | Output tokens/sec, measured per-refresh from the delta (not a session average) |
 | `🔧 Tool file` | Last tool used and target file (parsed from session transcript) |
-| `📋 done/total` | Task progress — completed vs total tasks, with current task name |
+| `📋 done/total` | Task progress, read live from `~/.claude/tasks/`, labelled with the task actually in progress. Obsolete tasks are excluded. Turns into `✓ done/total tasks` when everything is finished |
 | `plan: X% (Xh Xm)` | 5-hour rate limit usage; reset countdown shown when ≥ 50% |
 | `weekly: X% (Xd Xh)` | 7-day rate limit usage; only shown when ≥ 80% |
 
