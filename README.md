@@ -65,7 +65,14 @@ The script copies `statusline.sh` to `~/.claude/` and adds (or merges) the `stat
    chmod +x ~/.claude/statusline.sh
    ```
 
-2. **Add the `statusLine` block** to your `~/.claude/settings.json`:
+2. **Copy the subagent script** (optional, requires Claude Code v2.1.205+):
+
+   ```bash
+   cp subagent-statusline.sh ~/.claude/subagent-statusline.sh
+   chmod +x ~/.claude/subagent-statusline.sh
+   ```
+
+3. **Add the `statusLine` and `subagentStatusLine` blocks** to your `~/.claude/settings.json`:
 
    ```json
    {
@@ -73,11 +80,15 @@ The script copies `statusline.sh` to `~/.claude/` and adds (or merges) the `stat
        "type": "command",
        "command": "~/.claude/statusline.sh",
        "padding": 0
+     },
+     "subagentStatusLine": {
+       "type": "command",
+       "command": "~/.claude/subagent-statusline.sh"
      }
    }
    ```
 
-3. **Restart Claude Code** — the status bar appears immediately at the bottom of the session.
+4. **Restart Claude Code** — the status bar appears immediately at the bottom of the session.
 
 ## What each field shows
 
@@ -100,6 +111,21 @@ The script copies `statusline.sh` to `~/.claude/` and adds (or merges) the `stat
 | `📋 done/total` | Task progress, read live from `~/.claude/tasks/`, labelled with the task actually in progress. Obsolete tasks are excluded. Turns into `✓ done/total tasks` when everything is finished |
 | `plan: X% (Xh Xm)` | 5-hour rate limit usage; reset countdown shown when ≥ 50% |
 | `weekly: X% (Xd Xh)` | 7-day rate limit usage; only shown when ≥ 80% |
+
+## Subagent status lines (optional)
+
+`statusLine` only ever reports the main/top-level session — Claude Code doesn't
+route subagent metrics through it, even while you're viewing a subagent's
+transcript. `subagent-statusline.sh` uses the separate `subagentStatusLine`
+setting to render each subagent's own model, context usage, and effort in the
+agent panel:
+
+```
+scout · claude-haiku-4-5 (low) · 22% ctx (45k/200k)
+build · claude-sonnet-5 · 95% ctx (190k/200k)
+```
+
+Requires Claude Code v2.1.205+ (v2.1.214+ for the effort label).
 
 ## Sending metrics to an OTLP receiver (optional)
 
